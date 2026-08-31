@@ -1,4 +1,4 @@
-From ac328a600ba6b7f0613e451a97e206e093bbb687 Mon Sep 17 00:00:00 2001
+From 8e192cfb9eb5d9ae49f20d788df7dc289a7eff0b Mon Sep 17 00:00:00 2001
 From: lakitu12 <41334611+lakitu12@users.noreply.github.com>
 Date: Mon, 31 Aug 2026 22:02:50 +0800
 Subject: [PATCH] kqprobe: cdylib server + JNI entry + EOF fix + AHB stub +
@@ -7,10 +7,10 @@ Subject: [PATCH] kqprobe: cdylib server + JNI entry + EOF fix + AHB stub +
 ---
  kumquat/server/Cargo.toml                     |  6 ++
  kumquat/server/src/kumquat.rs                 |  7 +-
- kumquat/server/src/lib.rs                     | 70 +++++++++++++++++++
- src/gfxstream.rs                              | 44 ++----------
+ kumquat/server/src/lib.rs                     | 82 +++++++++++++++++++
+ src/gfxstream.rs                              | 44 ++--------
  .../magma-gpu-rs/lib/util/sys/linux/tube.rs   | 23 +++++-
- 5 files changed, 108 insertions(+), 42 deletions(-)
+ 5 files changed, 120 insertions(+), 42 deletions(-)
  create mode 100644 kumquat/server/src/lib.rs
 
 diff --git a/kumquat/server/Cargo.toml b/kumquat/server/Cargo.toml
@@ -55,10 +55,10 @@ index cd605a6..371ae98 100644
  
 diff --git a/kumquat/server/src/lib.rs b/kumquat/server/src/lib.rs
 new file mode 100644
-index 0000000..adaa6da
+index 0000000..26dfc92
 --- /dev/null
 +++ b/kumquat/server/src/lib.rs
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,82 @@
 +// lib.rs — kumquat server as Android cdylib (app-domain GPU broker)
 +// JNI: Java_me_lakitu_kqprobe_MainActivity_nativeStart(socketPath, statusPath)
 +mod kumquat;
@@ -98,19 +98,31 @@ index 0000000..adaa6da
 +    log_line(&status, &format!("nativeStart called, path={path}"));
 +    std::thread::spawn(move || {
 +        log_line(&status, "starting");
-+        // App domain cannot open root-only /dev/udmabuf (crw-------); the backend
-+        // auto-enables VulkanAllocateHostVisibleAsUdmabuf on 6.6+udmabuf and then
-+        // GFXSTREAM_FATALs in UdmabufCreator::init(). Force it disabled for now
-+        // (blob memory falls back to memfd; revisit with a udmabuf shim later).
++        // udmabuf (zero-copy host-visible blobs): gfxstream auto-enables
++        // VulkanAllocateHostVisibleAsUdmabuf when IsAndroidKernel6_6() &&
++        // HasUdmabufDevice(); init then open()s /dev/udmabuf O_RDONLY and
++        // GFXSTREAM_FATAL-aborts if that fails (dash stock: crw------- root).
++        // A KernelSU module chmods 666 + chcon gpu_device:s0 (sepolicy allows
++        // untrusted_app gpu_device:chr_file open/read/write/ioctl/map).
++        // Probe the same open the C++ init does: if it fails here, force the
++        // feature disabled (memfd blob path, no crash) instead of aborting.
++        // Second layer fixed in build-native.sh: -DHAVE_MEMFD_CREATE=1 so
++        // SharedMemory_posix.cpp seals the memfd (kernel udmabuf requires
++        // F_SEAL_SHRINK; unsealed memfd => EINVAL even as root).
++        let udmabuf_ok = std::fs::OpenOptions::new().read(true).open("/dev/udmabuf").is_ok();
++        log_line(&status, if udmabuf_ok { "udmabuf: probe OK (enabled)" } else { "udmabuf: probe FAIL (memfd fallback)" });
 +        let mut kumquat = match kumquat::KumquatBuilder::new()
 +            .set_capset_names("gfxstream-vulkan".to_string())
 +            .set_gpu_socket(Some(path.clone()))
 +            .set_renderer_features(
 +                // format: "Name:value" pairs split on ",;" (FeatureSet::processFeatureString)
-+                // udmabuf: app domain can't open root-only /dev/udmabuf (fatal abort).
 +                // ExternalBlob MUST stay on (blob-resources is the gfxstream memory backbone;
 +                // disabling it => guest "VirtGpuDevice does not support blob-resources").
-+                "VulkanAllocateHostVisibleAsUdmabuf:disabled".to_string(),
++                if udmabuf_ok {
++                    String::new()
++                } else {
++                    "VulkanAllocateHostVisibleAsUdmabuf:disabled".to_string()
++                },
 +            )
 +            .build()
 +        {

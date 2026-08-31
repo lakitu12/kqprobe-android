@@ -61,8 +61,13 @@ cpu = 'aarch64'
 endian = 'little'
 
 [built-in options]
-c_args = ['-DANDROID', '-DVK_USE_PLATFORM_ANDROID_KHR', '-I$SRC/gfxstream/third_party/android/include', '-I$STUB', '-I$SRC/gfxstream/third_party/x11/include', '-I$SRC/gfxstream/third_party/opengl/include', '-Wno-macro-redefined']
-cpp_args = ['-DANDROID', '-DVK_USE_PLATFORM_ANDROID_KHR', '-I$SRC/gfxstream/third_party/android/include', '-I$STUB', '-I$SRC/gfxstream/third_party/x11/include', '-I$SRC/gfxstream/third_party/opengl/include', '-Wno-macro-redefined', '-std=c++17']
+# HAVE_MEMFD_CREATE: meson's -DHAVE_MEMFD_CREATE=1 is only added on the
+# system()==linux branch; the android cross-file falls through, which would
+# compile SharedMemory_posix.cpp WITHOUT MFD_ALLOW_SEALING/F_ADD_SEALS ->
+# UDMABUF_CREATE fails EINVAL (kernel requires F_SEAL_SHRINK). Upstream
+# Android.bp defines it for the android target; mirror that here.
+c_args = ['-DANDROID', '-DVK_USE_PLATFORM_ANDROID_KHR', '-DHAVE_MEMFD_CREATE=1', '-I$SRC/gfxstream/third_party/android/include', '-I$STUB', '-I$SRC/gfxstream/third_party/x11/include', '-I$SRC/gfxstream/third_party/opengl/include', '-Wno-macro-redefined']
+cpp_args = ['-DANDROID', '-DVK_USE_PLATFORM_ANDROID_KHR', '-DHAVE_MEMFD_CREATE=1', '-I$SRC/gfxstream/third_party/android/include', '-I$STUB', '-I$SRC/gfxstream/third_party/x11/include', '-I$SRC/gfxstream/third_party/opengl/include', '-Wno-macro-redefined', '-std=c++17']
 c_link_args = ['-llog', '-landroid', '-lnativewindow']
 cpp_link_args = ['-llog', '-landroid', '-lnativewindow']
 
