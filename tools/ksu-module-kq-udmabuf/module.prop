@@ -1,0 +1,6 @@
+id=kq-udmabuf
+name=Kumquat udmabuf access
+version=v1
+versionCode=1
+author=lakitu12
+description=Open /dev/udmabuf for the kqprobe app GPU broker (chmod 660 system:graphics + gpu_device label)
