@@ -1,0 +1,102 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore: ['**.md', 'LICENSE', '.gitignore']
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact: native-so
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install meson/ninja/pkg-config/rustup
+        run: |
+          sudo apt update
+          sudo apt install -y meson ninja-build pkg-config python3 git
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Set up NDK (r26d — matches local cross toolchain)
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26d
+          add-to-path: false
+
+      - name: Build native deps (libgfxstream_backend.so + libkqserver.so)
+        run: |
+          export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
+          rustup target add aarch64-linux-android
+          bash scripts/build-native.sh
+        env:
+          # gfxstream host needs libepoxy? no — backend only links sysroot libs;
+          # build-native.sh pins gfxstream@5b92790 + rutabaga@13cde31 with patches/
+          CARGO_NET_RETRY: "5"
+
+      - name: Upload native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-so
+          path: app/src/main/jniLibs/arm64-v8a/
+          retention-days: 7
+
+  apk:
+    needs: native
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: native-so
+          path: app/src/main/jniLibs/arm64-v8a/
+
+      - name: Assemble release APK (unsigned -> signed if secrets present)
+        run: ./gradlew :app:assembleRelease
+
+      - name: Sign with debug keystore (selftest fallback)
+        if: env.KQPROBE_KEYBASE64 == ''
+        run: |
+          $ANDROID_HOME/build-tools/35.0.0/zipalign -f -p 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/apk/release/aligned.apk || true
+          keytool -genkeypair -v -keystore ci-debug.jks -alias kqprobe \
+            -keyalg RSA -keysize 2048 -validity 10000 -storepass android -dname "CN=CI" 2>/dev/null
+          $ANDROID_HOME/build-tools/35.0.0/apksigner sign --ks ci-debug.jks \
+            --ks-pass pass:android --key-pass pass:android \
+            --out kqprobe-release.apk app/build/outputs/apk/release/app-release-unsigned.apk
+
+      - name: Sign with release key (secrets)
+        if: env.KQPROBE_KEYBASE64 != ''
+        run: |
+          echo "$KQPROBE_KEYBASE64" | base64 -d > release.jks
+          { echo storeFile=$PWD/release.jks; echo storePassword=$KQPROBE_KSPASS; \
+            echo keyAlias=kqprobe; echo keyPassword=$KQPROBE_KSPASS; } > keystore.properties
+          ./gradlew :app:assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk kqprobe-release.apk
+        env:
+          KQPROBE_KEYBASE64: ${{ secrets.KQPROBE_KEYBASE64 }}
+          KQPROBE_KSPASS: ${{ secrets.KQPROBE_KSPASS }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: kqprobe-apk
+          path: kqprobe-release.apk

@@ -1,0 +1,258 @@
+From 12f71f051c4b8202c84a0fb7a2c2e323f1272216 Mon Sep 17 00:00:00 2001
+From: lakitu12 <41334611+lakitu12@users.noreply.github.com>
+Date: Mon, 31 Aug 2026 22:02:50 +0800
+Subject: [PATCH] kqprobe: cdylib server + JNI entry + EOF fix + AHB stub +
+ abstract socket
+
+---
+ .cargo/config.toml                            |  6 ++
+ kumquat/server/Cargo.toml                     |  6 ++
+ kumquat/server/src/kumquat.rs                 |  7 +-
+ kumquat/server/src/lib.rs                     | 70 +++++++++++++++++++
+ src/gfxstream.rs                              | 44 ++----------
+ .../magma-gpu-rs/lib/util/sys/linux/tube.rs   | 23 +++++-
+ 6 files changed, 114 insertions(+), 42 deletions(-)
+ create mode 100644 .cargo/config.toml
+ create mode 100644 kumquat/server/src/lib.rs
+
+diff --git a/.cargo/config.toml b/.cargo/config.toml
+new file mode 100644
+index 0000000..76e4e99
+--- /dev/null
++++ b/.cargo/config.toml
+@@ -0,0 +1,6 @@
++[target.aarch64-unknown-linux-gnu]
++linker = "aarch64-linux-gnu-gcc"
++
++[target.aarch64-linux-android]
++linker = "/home/lakitu/Android/Sdk/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
++rustflags = ["-C", "link-arg=-Wl,--allow-shlib-undefined"]
+diff --git a/kumquat/server/Cargo.toml b/kumquat/server/Cargo.toml
+index 24351cb..4106c93 100644
+--- a/kumquat/server/Cargo.toml
++++ b/kumquat/server/Cargo.toml
+@@ -12,6 +12,11 @@ rust-version = "1.81.0"
+ name = "kumquat"
+ path = "src/main.rs"
+ 
++[lib]
++name = "kqserver"
++crate-type = ["cdylib"]
++path = "src/lib.rs"
++
+ [features]
+ gfxstream = ["rutabaga_gfx/gfxstream"]
+ 
+@@ -23,3 +28,4 @@ log = "0.4"
+ remain = "0.2"
+ thiserror = "1.0.23"
+ clap = { version = "4.1.8", features = ["derive"] }
++jni = "0.21"
+diff --git a/kumquat/server/src/kumquat.rs b/kumquat/server/src/kumquat.rs
+index cd605a6..371ae98 100644
+--- a/kumquat/server/src/kumquat.rs
++++ b/kumquat/server/src/kumquat.rs
+@@ -56,8 +56,13 @@ impl Kumquat {
+                         KumquatConnection::GpuConnection(ref mut gpu_conn) => {
+                             if event.readable {
+                                 if let Some(ref mut kumquat_gpu) = self.kumquat_gpu_opt {
++                                    // process_command returns Ok(hung_up): false for a normal
++                                    // message, true when the peer sent EOF (OkNoData). Peers that
++                                    // exit signal EOF via EPOLLIN (level-triggered) *without*
++                                    // EPOLLHUP, so the old `!ret && event.hung_up` discarded EOF
++                                    // and left dead connections registered -> 100% CPU spin.
+                                     hung_up =
+-                                        !gpu_conn.process_command(kumquat_gpu)? && event.hung_up;
++                                        gpu_conn.process_command(kumquat_gpu)? || event.hung_up;
+                                 }
+                             }
+ 
+diff --git a/kumquat/server/src/lib.rs b/kumquat/server/src/lib.rs
+new file mode 100644
+index 0000000..adaa6da
+--- /dev/null
++++ b/kumquat/server/src/lib.rs
+@@ -0,0 +1,70 @@
++// lib.rs — kumquat server as Android cdylib (app-domain GPU broker)
++// JNI: Java_me_lakitu_kqprobe_MainActivity_nativeStart(socketPath, statusPath)
++mod kumquat;
++mod kumquat_gpu;
++
++use std::fs::OpenOptions;
++use std::io::Write;
++use std::os::raw::c_void;
++
++use jni::objects::JString;
++use jni::sys::jint;
++use jni::JNIEnv;
++
++fn log_line(path: &str, msg: &str) {
++    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
++        let _ = writeln!(f, "{}", msg);
++    }
++}
++
++/// Start the kumquat virtio-gpu server on a background thread.
++/// Returns 0 once the thread is spawned; real status goes to statusPath.
++#[no_mangle]
++pub extern "system" fn Java_me_lakitu_kqprobe_MainActivity_nativeStart<'local>(
++    mut env: JNIEnv<'local>,
++    _class: jni::objects::JClass<'local>,
++    socket_path: JString<'local>,
++    status_path: JString<'local>,
++) -> jint {
++    let path: String = match env.get_string(&socket_path) {
++        Ok(s) => s.into(),
++        Err(_) => return -1,
++    };
++    let status: String = match env.get_string(&status_path) {
++        Ok(s) => s.into(),
++        Err(_) => return -2,
++    };
++    log_line(&status, &format!("nativeStart called, path={path}"));
++    std::thread::spawn(move || {
++        log_line(&status, "starting");
++        // App domain cannot open root-only /dev/udmabuf (crw-------); the backend
++        // auto-enables VulkanAllocateHostVisibleAsUdmabuf on 6.6+udmabuf and then
++        // GFXSTREAM_FATALs in UdmabufCreator::init(). Force it disabled for now
++        // (blob memory falls back to memfd; revisit with a udmabuf shim later).
++        let mut kumquat = match kumquat::KumquatBuilder::new()
++            .set_capset_names("gfxstream-vulkan".to_string())
++            .set_gpu_socket(Some(path.clone()))
++            .set_renderer_features(
++                // format: "Name:value" pairs split on ",;" (FeatureSet::processFeatureString)
++                // udmabuf: app domain can't open root-only /dev/udmabuf (fatal abort).
++                // ExternalBlob MUST stay on (blob-resources is the gfxstream memory backbone;
++                // disabling it => guest "VirtGpuDevice does not support blob-resources").
++                "VulkanAllocateHostVisibleAsUdmabuf:disabled".to_string(),
++            )
++            .build()
++        {
++            Ok(k) => k,
++            Err(e) => {
++                log_line(&status, &format!("build FAILED: {e:?}"));
++                return;
++            }
++        };
++        log_line(&status, &format!("listening on {path}"));
++        loop {
++            if let Err(e) = kumquat.run() {
++                log_line(&status, &format!("run error: {e:?}"));
++            }
++        }
++    });
++    0
++}
+diff --git a/src/gfxstream.rs b/src/gfxstream.rs
+index c2af915..1940913 100644
+--- a/src/gfxstream.rs
++++ b/src/gfxstream.rs
+@@ -534,45 +534,11 @@ impl Gfxstream {
+         ret_to_res(ret)?;
+ 
+         if stream_handle.handle_type == RUTABAGA_HANDLE_TYPE_PLATFORM_AHB {
+-            #[cfg(target_os = "android")]
+-            {
+-                use crate::handle::AhbInfo;
+-                use nativewindow::AhbInfo as NativeAhbInfo;
+-                use nativewindow::HardwareBuffer;
+-                use std::os::fd::IntoRawFd;
+-                use std::ptr::NonNull;
+-
+-                let buffer_ptr = NonNull::new(stream_handle.os_handle as *mut c_void)
+-                    .ok_or(RutabagaError::InvalidResourceId)?;
+-
+-                // SAFETY:
+-                // Safe because `buffer_ptr` is a valid AHardwareBuffer pointer.
+-                let buffer = unsafe { HardwareBuffer::clone_from_raw(buffer_ptr.cast()) };
+-
+-                let ahb_info: NativeAhbInfo = buffer
+-                    .try_into()
+-                    .map_err(|_| RutabagaError::InvalidResourceId)?;
+-
+-                // Convert nativewindow::AhbInfo to RutabagaHandle::AhbInfo
+-                let fds = ahb_info
+-                    .fds
+-                    .into_iter()
+-                    .map(|fd| {
+-                        // SAFETY:
+-                        // Safe because the file descriptor is valid and owned.
+-                        unsafe { OwnedDescriptor::from_raw_descriptor(fd.into_raw_fd()) }
+-                    })
+-                    .collect();
+-
+-                Ok(Arc::new(RutabagaHandle::from(AhbInfo {
+-                    fds,
+-                    metadata: ahb_info.data,
+-                })))
+-            }
+-            #[cfg(not(target_os = "android"))]
+-            {
+-                Err(RutabagaError::InvalidResourceId)
+-            }
++            // PATCH(lakitu): upstream references the AOSP-internal `nativewindow`
++            // crate (not on crates.io), which breaks cargo builds for
++            // aarch64-linux-android. AHB export stubbed; udmabuf path unaffected.
++            let _ = stream_handle;
++            Err(RutabagaError::InvalidResourceId)
+         } else {
+             let raw_descriptor = stream_handle.os_handle as RawDescriptor;
+             // SAFETY:
+diff --git a/third_party/mesa3d/src/virtio/magma-gpu-rs/lib/util/sys/linux/tube.rs b/third_party/mesa3d/src/virtio/magma-gpu-rs/lib/util/sys/linux/tube.rs
+index ebc73ba..cf68585 100644
+--- a/third_party/mesa3d/src/virtio/magma-gpu-rs/lib/util/sys/linux/tube.rs
++++ b/third_party/mesa3d/src/virtio/magma-gpu-rs/lib/util/sys/linux/tube.rs
+@@ -7,6 +7,7 @@ use std::io::IoSlice;
+ use std::io::IoSliceMut;
+ use std::mem::MaybeUninit;
+ use std::os::fd::AsFd;
++use std::os::unix::ffi::OsStrExt;
+ use std::path::Path;
+ 
+ use rustix::cmsg_space;
+@@ -40,6 +41,24 @@ use crate::util::TubeType;
+ 
+ const MAX_IDENTIFIERS: usize = 28;
+ 
++/* PATCH(nous-hermes): a leading '@' in a unix socket path selects the abstract
++ * namespace instead of a filesystem pathname (linux only). Applied on both the
++ * client (Tube::new) and server (Listener::bind) side, so "@kumquat-gpu-0"
++ * works symmetrically. */
++fn unix_addr_from_bytes(bytes: &[u8]) -> rustix::io::Result<SocketAddrUnix> {
++    #[cfg(any(target_os = "linux", target_os = "android"))]
++    {
++        if let Some(name) = bytes.strip_prefix(b"@") {
++            return SocketAddrUnix::new_abstract_name(name);
++        }
++    }
++    let path = {
++        use std::os::unix::ffi::OsStrExt;
++        std::path::Path::new(std::ffi::OsStr::from_bytes(bytes))
++    };
++    SocketAddrUnix::new(path)
++}
++
+ pub struct Tube {
+     socket: OwnedDescriptor,
+ }
+@@ -88,7 +107,7 @@ impl Tube {
+             )?,
+         };
+ 
+-        let unix_addr = SocketAddrUnix::new(path)?;
++        let unix_addr = unix_addr_from_bytes(path.as_ref().as_os_str().as_bytes())?;
+         connect(&socket, &unix_addr)?;
+ 
+         Ok(Tube {
+@@ -168,7 +187,7 @@ impl Listener {
+             None,
+         )?;
+ 
+-        let unix_addr = SocketAddrUnix::new(path)?;
++        let unix_addr = unix_addr_from_bytes(path.as_ref().as_os_str().as_bytes())?;
+         bind(&socket, &unix_addr)?;
+         listen(&socket, 128)?;
+ 
+-- 
+2.53.0
+

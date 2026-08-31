@@ -1,0 +1,25 @@
+From 43a2e8c1d8415c87a53c6e24457d99d54681985c Mon Sep 17 00:00:00 2001
+From: lakitu12 <41334611+lakitu12@users.noreply.github.com>
+Date: Mon, 31 Aug 2026 22:02:50 +0800
+Subject: [PATCH] kqprobe: native_window android system branch
+
+---
+ host/native_window/meson.build | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/host/native_window/meson.build b/host/native_window/meson.build
+index fe6a556..5192442 100644
+--- a/host/native_window/meson.build
++++ b/host/native_window/meson.build
+@@ -29,6 +29,8 @@ elif host_machine.system() == 'qnx'
+   files_lib_host_native_window += files(
+     'native_sub_window_qnx.cpp',
+   )
++elif host_machine.system() == 'android'
++  files_lib_host_native_window += files('native_sub_window_android.cpp')
+ endif
+ 
+ lib_host_native_window = static_library(
+-- 
+2.53.0
+
