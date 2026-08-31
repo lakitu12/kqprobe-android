@@ -1,32 +1,18 @@
-From 12f71f051c4b8202c84a0fb7a2c2e323f1272216 Mon Sep 17 00:00:00 2001
+From ac328a600ba6b7f0613e451a97e206e093bbb687 Mon Sep 17 00:00:00 2001
 From: lakitu12 <41334611+lakitu12@users.noreply.github.com>
 Date: Mon, 31 Aug 2026 22:02:50 +0800
 Subject: [PATCH] kqprobe: cdylib server + JNI entry + EOF fix + AHB stub +
  abstract socket
 
 ---
- .cargo/config.toml                            |  6 ++
  kumquat/server/Cargo.toml                     |  6 ++
  kumquat/server/src/kumquat.rs                 |  7 +-
  kumquat/server/src/lib.rs                     | 70 +++++++++++++++++++
  src/gfxstream.rs                              | 44 ++----------
  .../magma-gpu-rs/lib/util/sys/linux/tube.rs   | 23 +++++-
- 6 files changed, 114 insertions(+), 42 deletions(-)
- create mode 100644 .cargo/config.toml
+ 5 files changed, 108 insertions(+), 42 deletions(-)
  create mode 100644 kumquat/server/src/lib.rs
 
-diff --git a/.cargo/config.toml b/.cargo/config.toml
-new file mode 100644
-index 0000000..76e4e99
---- /dev/null
-+++ b/.cargo/config.toml
-@@ -0,0 +1,6 @@
-+[target.aarch64-unknown-linux-gnu]
-+linker = "aarch64-linux-gnu-gcc"
-+
-+[target.aarch64-linux-android]
-+linker = "/home/lakitu/Android/Sdk/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
-+rustflags = ["-C", "link-arg=-Wl,--allow-shlib-undefined"]
 diff --git a/kumquat/server/Cargo.toml b/kumquat/server/Cargo.toml
 index 24351cb..4106c93 100644
 --- a/kumquat/server/Cargo.toml

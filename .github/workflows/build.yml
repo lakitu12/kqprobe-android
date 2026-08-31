@@ -17,12 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install meson/ninja/pkg-config/rustup
+      - name: Install meson/ninja/pkg-config
         run: |
           sudo apt update
           sudo apt install -y meson ninja-build pkg-config python3 git
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # runner ships rustup preinstalled; keep its RUSTUP_HOME/CARGO_HOME
+          # (installing rustup.rs separately splits targets across two homes)
+          rustup show
+          rustup target add aarch64-linux-android
 
       - name: Set up NDK (r26d — matches local cross toolchain)
         uses: nttld/setup-ndk@v1
@@ -34,7 +36,8 @@ jobs:
       - name: Build native deps (libgfxstream_backend.so + libkqserver.so)
         run: |
           export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
-          rustup target add aarch64-linux-android
+          which cargo rustc
+          rustup target list --installed | grep aarch64-linux-android
           bash scripts/build-native.sh
         env:
           # gfxstream host needs libepoxy? no — backend only links sysroot libs;
