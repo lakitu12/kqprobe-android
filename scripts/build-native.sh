@@ -95,9 +95,9 @@ linker = "$LLVM/aarch64-linux-android34-clang"
 rustflags = ["-C", "link-arg=-Wl,--allow-shlib-undefined"]
 CARGO
 
-# rustup target (skip if installed)
-rustup target list --installed 2>/dev/null | grep -q aarch64-linux-android \
-  || rustup target add aarch64-linux-android
+# rustup target: rutabaga pins 1.88.0 via rust-toolchain.toml — add the target
+# INSIDE the checkout so it lands in the pinned toolchain, not the default one.
+( cd "$SRC/rutabaga_gfx" && rustup target add aarch64-linux-android )
 
 ( cd "$SRC/rutabaga_gfx" \
   && GFXSTREAM_PATH="$SRC/gfxstream-build/host" \
